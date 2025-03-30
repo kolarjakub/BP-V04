@@ -1,0 +1,11 @@
+../Core/Src/mbus.c:36:13:HALCPU_CRC_CRC16CCITT	2
+../Core/Src/mbus.c:45:13:CalculateFCS	2
+../Core/Src/mbus.c:64:10:MBUS_UpdateTransmittedData	6
+../Core/Src/mbus.c:84:10:MBUS_GetProcessedData	2
+../Core/Src/mbus.c:101:13:MBUS_FillTransmitBuffer	1
+../Core/Src/mbus.c:106:13:MBUS_FillReceivedBuffer	1
+../Core/Src/mbus.c:111:13:MBUS_Reset	1
+../Core/Src/mbus.c:123:10:MBUS_Init	11
+../Core/Src/mbus.c:177:6:HAL_UART_ErrorCallback	1
+../Core/Src/mbus.c:190:7:HAL_UART_TxCpltCallback	12
+../Core/Src/mbus.c:252:6:HAL_UART_RxCpltCallback	20

@@ -1,0 +1,5 @@
+../Core/Src/rpm.c:4:10:MX_RPM_Init	48	static
+../Core/Src/rpm.c:35:13:TIM1_Start_IT	16	static
+../Core/Src/rpm.c:48:6:HAL_TIM_IC_CaptureCallback	16	static,ignoring_inline_asm
+../Core/Src/rpm.c:74:6:HAL_TIM_PeriodElapsedCallback	16	static,ignoring_inline_asm
+../Core/Src/rpm.c:84:6:RPM_Process	8	static
