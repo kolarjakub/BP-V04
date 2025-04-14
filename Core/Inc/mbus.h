@@ -3,6 +3,7 @@
 
 #include "stm32c0xx_hal.h"
 #include "stm32c0xx_hal_uart.h"
+#include "stm32c0xx_hal_tim.h"
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -10,10 +11,19 @@
 
 #define PAYLOAD_MAX_SIZE 32
 
+#define myID 0x0C
+#define RXIDbroadcast 0x0F
+#define SYNCbyte 0x55
+#define CHIDdebug 0x07
+#define CHIDmonitor 0x06
+#define IDLEframe 0xA5
+#define CHIDrpm 0xBB
+#define MBUSBridgeID 0x03
+
 extern TIM_HandleTypeDef htim3;
 extern UART_HandleTypeDef huart;
 
-enum MBUS_FrameStructure {
+enum FrameStructure {
 	IDLE,
 //    BREAK,
     TXID,
@@ -23,6 +33,19 @@ enum MBUS_FrameStructure {
     Payload,
     FCS,
 	ACK
+};
+
+enum ProcessedFrameStatus {
+	TX_IDLE_FRAME,
+	TX_NO_ACK,
+	TX_OK,
+	ERROR_TIMEOUT,
+	RX_OK,
+	RX_ERROR,
+	RX_NOT_MY_ADDRESS,
+	ERROR_INVALID_POINTER,
+	SYNC_BYTE,
+	NO_NEW_DATA
 };
 
 struct FrameBuffer{
@@ -71,14 +94,9 @@ static const uint16_t HALCPU_CRC_CRC16CCITT_LUT8B_au16[256] = {
 0x7BC7u, 0x6A4Eu, 0x58D5u, 0x495Cu, 0x3DE3u, 0x2C6Au, 0x1EF1u, 0x0F78u
 };
 
-
-
-
+// API
 unsigned MBUS_Init(void);
-
-unsigned MBUS_UpdateTransmittedData(const uint8_t aRXID,const uint8_t aCHID,const uint8_t aPayloadSize,const uint8_t aPayload[PAYLOAD_MAX_SIZE]);
-
-unsigned MBUS_GetProcessedData(struct FrameBuffer *aFrameBuffer);
-
+unsigned MBUS_SetTransmittedData(const uint8_t aRXID,const uint8_t aCHID,const uint8_t aPayloadSize,const uint8_t aPayload[PAYLOAD_MAX_SIZE],const bool aAlowOverwrite);
+enum ProcessedFrameStatus MBUS_GetProcessedFrame(struct FrameBuffer *aFrameBuffer);
 
 #endif /* __MBUS_H */

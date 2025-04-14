@@ -19,16 +19,15 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
-TIM_HandleTypeDef htim1;
-
-uint8_t MSG[3] = {0x0A,0x0B,0x0C};
-
-
-unsigned counter=0;
-
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 
+unsigned counterTX_NO_ACK=0;
+unsigned counterTX_IDLE_FRAME=0;
+unsigned counterELSE=0;
+
+uint32_t last_time=0;
+uint32_t elapsed=0;
 
 int main(void)
 {
@@ -36,34 +35,35 @@ int main(void)
   SystemClock_Config();
   MX_GPIO_Init();
 
-  //if (MX_RPM_Init(&htim1)){Error_Handler();}
+  if (RPM_Init()){Error_Handler();}
+  if (MBUS_Init()){Error_Handler();}
 
-  if (MBUS_Init()){
-	  Error_Handler();
-  }
+  struct FrameBuffer *ReceivedFrameBuffer=calloc(1,sizeof(struct FrameBuffer));
+  if(ReceivedFrameBuffer==NULL){Error_Handler();}
 
+  uint8_t *RPMMessage=calloc(RPM_MESSAGE_SIZE,sizeof(uint8_t));
+  if(RPMMessage==NULL){Error_Handler();}
+
+  last_time=HAL_GetTick();
   while (1)
   {
-	  //MBUS_Transmit(&hmbus);
-
-	  //HAL_UART_Transmit_IT(&huart, MSG, 3);
-	  counter++;
-
-	  /*
-	  unsigned MBUS_UpdateTransmittedData(const uint8_t aRXID
-	  	  	  	  	  	  	  	  	  	  	,const uint8_t aCHID
-											,const uint8_t aPayloadSize
-											,const uint8_t aPayload[PAYLOAD_MAX_SIZE]){
-	  • 0x06: Monitor (COM_MON)
-	  • 0x07: Debug Output
-	  */
-
-	  if(MBUS_UpdateTransmittedData(0x01,0x06,0x03,MSG)){
-		  Error_Handler();
+	  if(!RPM_GetData(RPMMessage))
+	  {
+		  elapsed=HAL_GetTick()-last_time;
+		  last_time=HAL_GetTick();
+		  if(!MBUS_SetTransmittedData(MBUSBridgeID,CHIDrpm,RPM_MESSAGE_SIZE,RPMMessage,true))
+		  {
+			  __NOP();
+		  }
 	  }
 
 
-	  HAL_Delay(2000);
+	  if(MBUS_GetProcessedFrame(ReceivedFrameBuffer)==TX_NO_ACK){counterTX_NO_ACK++;}
+	  else if(MBUS_GetProcessedFrame(ReceivedFrameBuffer)==TX_IDLE_FRAME){counterTX_IDLE_FRAME++;}
+	  else(counterELSE++);
+
+	  // HAL_Delay(1000);
+
   }
 }
 
@@ -80,7 +80,7 @@ void SystemClock_Config(void)
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSIDiv = RCC_HSI_DIV4;
+  RCC_OscInitStruct.HSIDiv = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
@@ -113,6 +113,7 @@ void Error_Handler(void)
  __disable_irq();
   while (1)
   {
+	  __NOP();
   }
 }
 
@@ -126,9 +127,5 @@ void Error_Handler(void)
   */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

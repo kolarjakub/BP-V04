@@ -3,34 +3,21 @@
 TIM_HandleTypeDef htim3;
 UART_HandleTypeDef huart;
 
-enum MBUS_FrameStructure MBUS_FrameStatus;
+enum FrameStructure MBUS_FrameStatus;
+enum ProcessedFrameStatus MBUS_ProcessedFrameStatus;
 
 struct FrameBuffer *MBUS_FrameBuffer;
 struct FrameBuffer *MBUS_FrameBuffer_ToTransmit;
-struct FrameBuffer *MBUS_FrameBuffer_Received;
+struct FrameBuffer *MBUS_FrameBuffer_Processed;
 
-uint8_t FCS_calc_buffer[2];
-
-const uint8_t myID=0x0A;	//example
-const uint8_t broadcastID=0x0F;
 const uint8_t ACKbyte=0xA5;
-const uint8_t SYNCbyte=0x55;
-const uint8_t CHIDdebug=0x07;
-const uint8_t CHIDmonitor=0x06;
+uint8_t tmpFCSbuffer[2];
+volatile static bool bNewDataToTransmit=false;
+volatile static bool bNewProcessedData=false;
 
+uint16_t timerTop=320;
+uint16_t timerFrameDuration=10;
 
-/**
- * The following channel IDs are reserved for standard Miele layer III protocols:
-• 0x01: Update (COM_UPDATE)
-• 0x02: Motor control
-• 0x03: SSACP (COM_SSACP)
-• 0x04: System Check
-• 0x05: DSM
-• 0x06: Monitor (COM_MON)
-• 0x07: Debug Output
-• 0x08: Object protocol (COM_OBJ)
-• 0x09: Data Object Protocol 2 (DOP2)
- **/
 
 // INTERNAL: FRAME CHECKSUM SUBFUNCTION
 void static HALCPU_CRC_CRC16CCITT(const uint8_t aData[], const uint16_t aSize, uint8_t aCRCresult[2],uint16_t aCRCinput) {
@@ -46,14 +33,12 @@ void static CalculateFCS(uint8_t aFCS[2],struct FrameBuffer *aFrameBuffer){
 	uint16_t CurrentFrameSize=4*sizeof(uint8_t)+MBUS_FrameBuffer->PS[0];
 	uint8_t *tmpFrameBuffer;
 	tmpFrameBuffer=malloc(CurrentFrameSize*sizeof(uint8_t));
-	//if (!tmpFrameBuffer) {return 1;}
-
 	tmpFrameBuffer[0]=aFrameBuffer->TXID[0];
 	tmpFrameBuffer[1]=aFrameBuffer->RXID[0];
 	tmpFrameBuffer[2]=aFrameBuffer->CHID[0];
 	tmpFrameBuffer[3]=aFrameBuffer->PS[0];
 	for (uint16_t i = 0 ; i < aFrameBuffer->PS[0]; i++ ){
-		tmpFrameBuffer[4+i]=aFrameBuffer->Payload[i];	// copy data from Payload to Frame_buffer
+		tmpFrameBuffer[4+i]=aFrameBuffer->Payload[i];	// copy data from Payload to tmpFrameBuffer
 	}
 
 	HALCPU_CRC_CRC16CCITT(tmpFrameBuffer,CurrentFrameSize,aFCS,0xFFFF);
@@ -61,59 +46,57 @@ void static CalculateFCS(uint8_t aFCS[2],struct FrameBuffer *aFrameBuffer){
 }
 
 // API: UPDATE DATA TO TRANSMIT
-unsigned MBUS_UpdateTransmittedData(const uint8_t aRXID,const uint8_t aCHID,const uint8_t aPayloadSize,const uint8_t aPayload[PAYLOAD_MAX_SIZE]){
+unsigned MBUS_SetTransmittedData(const uint8_t aRXID,const uint8_t aCHID,const uint8_t aPayloadSize,const uint8_t aPayload[PAYLOAD_MAX_SIZE],const bool aAlowOverwrite){
+	if(	bNewDataToTransmit && !aAlowOverwrite){return 1;}	// last data not processed && overwrite is not allowed
+
 	MBUS_FrameBuffer_ToTransmit->TXID[0]=myID;
-	if(aRXID>=0x00 && aRXID<=0x0F && aRXID!=myID){	// invalid arguments
-		MBUS_FrameBuffer_ToTransmit->RXID[0]=aRXID;
-	}
-	else{return 1;}
+	if(aRXID>=0x00 && aRXID<=0x0F && aRXID!=myID){MBUS_FrameBuffer_ToTransmit->RXID[0]=aRXID;}	// check argument validity
+	else{return 2;}
 
 	MBUS_FrameBuffer_ToTransmit->CHID[0]=aCHID;
 
-	if(aPayloadSize>0 && aPayloadSize<=PAYLOAD_MAX_SIZE && aPayload){	// invalid arguments
+	if(aPayloadSize>0 && aPayloadSize<=PAYLOAD_MAX_SIZE && aPayload){	// check argument validity
 		MBUS_FrameBuffer_ToTransmit->PS[0]=aPayloadSize;
 		memcpy(MBUS_FrameBuffer_ToTransmit->Payload,aPayload,aPayloadSize);
 	}
-	else{return 2;}
+	else{return 3;}
 
 	CalculateFCS(MBUS_FrameBuffer_ToTransmit->FCS,MBUS_FrameBuffer_ToTransmit);
+	MBUS_FrameBuffer_ToTransmit->ACK[0]=0xFF;
+	bNewDataToTransmit=true;
 	return 0;
 }
 
 // API: FOR MAIN
-unsigned MBUS_GetProcessedData(struct FrameBuffer *aFrameBuffer){	// ale pozor abych si tam potom nesahal z mainu na ta data, kdyz dostanu tu adresu
-	// OVERENi VALIDITY DAT a PRIPADNE JESTE SEPAROVANI
-	// informace o tom, jestli ty data jsou novy
-
-	// radsi asi predat primo kopii dat nez pointer, aby se mi tam na to nesahalo
-
-	if(aFrameBuffer==MBUS_FrameBuffer_Received){	// SAME DATA
-		return 1;
+enum ProcessedFrameStatus MBUS_GetProcessedFrame(struct FrameBuffer *aFrameBuffer){
+	if(bNewProcessedData){
+		if(aFrameBuffer== NULL){return ERROR_INVALID_POINTER;}	// invalid pointer
+		aFrameBuffer=MBUS_FrameBuffer_Processed;
+		bNewProcessedData=false;
+		return MBUS_ProcessedFrameStatus;
 	}
-	else{
-		// HANDLING NA TO, JESTLI JSEM HO ODVYSILAL NEBO HO PRIJAL
-		aFrameBuffer=MBUS_FrameBuffer_Received;
-		return 0;
-	}
+	else{return NO_NEW_DATA;}
 }
 
 // INTERNAL: INPUT DATA TO TRANSMIT
-void static MBUS_FillTransmitBuffer(void){
-	MBUS_FrameBuffer=MBUS_FrameBuffer_ToTransmit;
+void static MBUS_UpdateTransmittedBuffer(void){
+	if(bNewDataToTransmit){	// no new data -> transmit IDLE frame
+		MBUS_FrameBuffer=MBUS_FrameBuffer_ToTransmit;
+		bNewDataToTransmit=false;
+	}
+	else{MBUS_FrameBuffer->RXID[0]=IDLEframe;}
 }
 
-// INTERNAL: RECEIVED DATA TO OUTPUT
-void static MBUS_FillReceivedBuffer(void){
-	MBUS_FrameBuffer_Received=MBUS_FrameBuffer;
+// INTERNAL: RECEIVED DATA TO OUTPUT BUFFER
+void static MBUS_UpdateProcessedBuffer(enum ProcessedFrameStatus aProcessedFrameStatus){
+	MBUS_FrameBuffer_Processed=MBUS_FrameBuffer;
+	MBUS_ProcessedFrameStatus = aProcessedFrameStatus;
+	bNewProcessedData=true;
 }
 
 // INTERNAL: RESET COMMUNICATION
 void static MBUS_Reset(void){
-	//HAL_TIM_Base_Stop_IT(&htim3);
-
-	//HAL_TIM_OC_Stop_IT(&htim3, TIM_CHANNEL_1);
-    //__HAL_TIM_SET_COUNTER(&htim3, 0);	// RESET TIMEOUT TIMER
-
+	HAL_TIM_OC_Stop_IT(&htim3, TIM_CHANNEL_1);
     MBUS_FrameBuffer->TXID[0]=0xFF;
 	HAL_UART_Receive_IT(&huart,MBUS_FrameBuffer->BREAK, sizeof(MBUS_FrameBuffer->BREAK));
 	MBUS_FrameStatus=IDLE;
@@ -125,7 +108,6 @@ unsigned MBUS_Init(void) {
 	huart.Instance = USART1;
 	huart.Init.BaudRate = 57600;
 	huart.Init.WordLength = UART_WORDLENGTH_8B;
-
 	huart.Init.StopBits = UART_STOPBITS_1;
 	huart.Init.Parity = UART_PARITY_NONE;
 	huart.Init.Mode = UART_MODE_TX_RX;
@@ -134,66 +116,61 @@ unsigned MBUS_Init(void) {
 	huart.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
 	huart.Init.ClockPrescaler = UART_PRESCALER_DIV1;
 	huart.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-
 	if (HAL_UART_Init(&huart) != HAL_OK) {return 1;}
 	if (HAL_UARTEx_SetTxFifoThreshold(&huart, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK) {return 2;}
 	if (HAL_UARTEx_SetRxFifoThreshold(&huart, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK) {return 3;}
 	if (HAL_UARTEx_DisableFifoMode(&huart) != HAL_OK) {return 4;}
-
 	MBUS_FrameBuffer=calloc(1,sizeof(struct FrameBuffer));
 	MBUS_FrameBuffer_ToTransmit=calloc(1,sizeof(struct FrameBuffer));
-	MBUS_FrameBuffer_Received=calloc(1,sizeof(struct FrameBuffer));
-	if (!MBUS_FrameBuffer || !MBUS_FrameBuffer_ToTransmit || !MBUS_FrameBuffer_Received) {return 5;}
+	MBUS_FrameBuffer_Processed=calloc(1,sizeof(struct FrameBuffer));
+	if (MBUS_FrameBuffer== NULL || MBUS_FrameBuffer_ToTransmit== NULL || MBUS_FrameBuffer_Processed== NULL) {return 5;}
 
-
-	// MBUS TIMEOUT INIT
+	// MBUS TIMEOUT TIMER INIT
 	TIM_MasterConfigTypeDef sMasterConfig = {0};
+	TIM_ClockConfigTypeDef sClockSourceConfig = {0};
 	TIM_OC_InitTypeDef sConfigOC = {0};
-
 	htim3.Instance = TIM3;
-	htim3.Init.Prescaler = 4;
+	htim3.Init.Prescaler = 2500;
 	htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
 	htim3.Init.Period = 65535;
-	htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV4;
+	//htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV4;
 	htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-	if (HAL_TIM_OC_Init(&htim3) != HAL_OK){return 6;}
+	if (HAL_TIM_Base_Init(&htim3) != HAL_OK){return 6;}
+	sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+	if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK){return 7;}
+	if (HAL_TIM_OC_Init(&htim3) != HAL_OK){return 8;}
 	sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
 	sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-	if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK){return 7;}
+	if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK){return 9;}
 	sConfigOC.OCMode = TIM_OCMODE_TIMING;
-	sConfigOC.Pulse = 0;
+	sConfigOC.Pulse = timerTop;
 	sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
 	sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-	if (HAL_TIM_OC_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK){return 8;}
-	//HAL_TIM_Base_Start_IT(&htim3);
-	//HAL_TIM_OC_Start_IT(&htim3, TIM_CHANNEL_1);
+	if (HAL_TIM_OC_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK){return 10;}
 
-	// START COMMUNICATIOn
+	// START COMMUNICATION
 	MBUS_Reset();
 	return 0;
 }
 
-// INTERNAL: BREAK EVENT
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
-	if (HAL_UART_ERROR_FE) {	//huart->ErrorCode &
-		__HAL_UART_CLEAR_FEFLAG(huart);
-    	//HAL_TIM_Base_Start_IT(&htim3);
+void MBUS_StartTimeoutTimer(void)
+{
+	HAL_TIM_OC_Stop_IT(&htim3, TIM_CHANNEL_1);		// STOP TIMEOUT TIMER
+	if(MBUS_FrameStatus==Payload){__HAL_TIM_SET_COUNTER(&htim3,timerTop-MBUS_FrameBuffer->PS[0]*timerFrameDuration);}
+	else if(MBUS_FrameStatus==FCS){__HAL_TIM_SET_COUNTER(&htim3,timerTop-2*timerFrameDuration);}
+	else{__HAL_TIM_SET_COUNTER(&htim3,timerTop-timerFrameDuration);}
+	HAL_TIM_OC_Start_IT(&htim3, TIM_CHANNEL_1);		// START TIMEOUT TIMER
 
-		HAL_TIM_OC_Start_IT(&htim3, TIM_CHANNEL_1);
-
-    	HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->TXID, sizeof(MBUS_FrameBuffer->TXID));
-    	MBUS_FrameStatus=TXID;
-    }
 }
 
 // INTERNAL: INTERRUPT - UART FINISHED TRANSMITTING
  void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1){
+    	__disable_irq();
     	switch (MBUS_FrameStatus) {
     	    case IDLE:
-    	    	MBUS_Reset();
-    	        break;
+    	    	break;
 
     	    case TXID:
     	    	// FAULT:
@@ -202,8 +179,14 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
 
     	    case RXID:
     	    	// MASTER:
-        		HAL_UART_Transmit_IT(huart,MBUS_FrameBuffer->CHID, sizeof(MBUS_FrameBuffer->CHID));
-	        	MBUS_FrameStatus=CHID;
+    	    	if(MBUS_FrameBuffer->RXID[0]==IDLEframe){
+	    			MBUS_UpdateProcessedBuffer(TX_IDLE_FRAME);
+    	    		MBUS_Reset();	// transmitted IDLE frame -> wait for new communication
+    	    	}
+    	    	else{
+    	    		HAL_UART_Transmit_IT(huart,MBUS_FrameBuffer->CHID, sizeof(MBUS_FrameBuffer->CHID));
+    	    		MBUS_FrameStatus=CHID;
+    	    	}
         		break;
 
     	    case CHID:
@@ -214,29 +197,31 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
 
     	    case PS:
     	    	// MASTER:
-    	    	HAL_UART_Transmit_IT(huart,MBUS_FrameBuffer->Payload,MBUS_FrameBuffer->PS[0]);	// odesilam pocet Bytu, co jsem nastavil v PS
+    	    	HAL_UART_Transmit_IT(huart,MBUS_FrameBuffer->Payload,MBUS_FrameBuffer->PS[0]);
 	        	MBUS_FrameStatus=Payload;
     	        break;
 
     	    case Payload:
     	    	// MASTER:
-    	    	HAL_UART_Transmit_IT(huart,MBUS_FrameBuffer->FCS, sizeof(MBUS_FrameBuffer->FCS));	// odvysilani Checksum po celem Frame
+    	    	HAL_UART_Transmit_IT(huart,MBUS_FrameBuffer->FCS, sizeof(MBUS_FrameBuffer->FCS));
 	        	MBUS_FrameStatus=FCS;
         		break;
 
     	    case FCS:
     	    	// MASTER:
-    	    	if(myID==MBUS_FrameBuffer->TXID[0] && MBUS_FrameBuffer->RXID[0]!=broadcastID){	// po odvysilani celeho Frame ocekavam ACK, pokud to neni broadcast
+    	    	if(myID==MBUS_FrameBuffer->TXID[0] && MBUS_FrameBuffer->RXID[0]!=RXIDbroadcast){	// after frame transmission I expect ACK byte
     	        	HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->ACK, sizeof(MBUS_FrameBuffer->ACK));
     	        	MBUS_FrameStatus=ACK;
     	    	}
-    	    	else{	// FAULT OR RXID IS BROADCAST
+    	    	else{	// fault or RXID is broadcast
+	    			MBUS_UpdateProcessedBuffer(TX_OK);
     	    		MBUS_Reset();
     	    	}
     	        break;
 
     	    case ACK:
     	    	// SLAVE:
+    			MBUS_UpdateProcessedBuffer(RX_OK);
     	    	MBUS_Reset();
     	        break;
 
@@ -244,7 +229,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
     	    	MBUS_Reset();
     	    	break;
     	}
-
+    	MBUS_StartTimeoutTimer();
+    	__enable_irq();
     }
 }
 
@@ -252,36 +238,39 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if (huart->Instance == USART1){
+    	__disable_irq();
 		switch (MBUS_FrameStatus) {
 		    case IDLE:
-		    	//MBUS_Reset();
 				break;
 
 		    case TXID:
 		    	// MASTER:
 		        if(MBUS_FrameBuffer->TXID[0]==myID){
-		        	MBUS_FillTransmitBuffer();
+		        	MBUS_UpdateTransmittedBuffer();
 	        		HAL_UART_Transmit_IT(huart,MBUS_FrameBuffer->RXID, sizeof(MBUS_FrameBuffer->RXID));
 		        	MBUS_FrameStatus=RXID;
 		        }
 		        // SLAVE:
-		        else if (MBUS_FrameBuffer->TXID[0]>=0x00 && MBUS_FrameBuffer->TXID[0]<=0x0E){	//nevysilam, ale dal posloucham, jestli nejake zpravy nebudou pro me
+		        else if (MBUS_FrameBuffer->TXID[0]>=0x00 && MBUS_FrameBuffer->TXID[0]<=0x0E){	// check validity of TXID
 		        	HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->RXID, sizeof(MBUS_FrameBuffer->RXID));
 			        MBUS_FrameStatus=RXID;
 		        }
-		        // RESET:
-		        else{	// SYNCbyte nebo nevalidni ID -> jdu cekat na novy zacatek
+		        // RESET
+		        else{	// invalid TXID or SYNC byte
+		        	if(MBUS_FrameBuffer->TXID[0]>=SYNCbyte){MBUS_UpdateProcessedBuffer(SYNC_BYTE);}
+		        	else{MBUS_UpdateProcessedBuffer(RX_ERROR);}
 		        	MBUS_Reset();
 		        }
 		        break;
 
 		    case RXID:
 		    	// SLAVE:
-		        if(myID==MBUS_FrameBuffer->RXID[0] || broadcastID ==MBUS_FrameBuffer->RXID[0]){	// ID je moje nebo broadcast, budu prijimat Frame
+		        if(myID==MBUS_FrameBuffer->RXID[0] || RXIDbroadcast ==MBUS_FrameBuffer->RXID[0]){	// received RXID is equal to myID or broadcast
 		        	HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->CHID, sizeof(MBUS_FrameBuffer->CHID));
 		        	MBUS_FrameStatus=CHID;
 		        }
-		        else{	// zpravy nejsou pro me, jdu cekat na novy zacatek
+		        else{	// frame is not for me
+		        	MBUS_UpdateProcessedBuffer(RX_NOT_MY_ADDRESS);
 		        	MBUS_Reset();
 		        }
 		        break;
@@ -301,25 +290,26 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		    case Payload:
 		    	// SLAVE:
 	        	HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->FCS,sizeof(MBUS_FrameBuffer->FCS));
-	    		CalculateFCS(FCS_calc_buffer,MBUS_FrameBuffer);
+	    		CalculateFCS(tmpFCSbuffer,MBUS_FrameBuffer);
 	        	MBUS_FrameStatus=FCS;
 	    		break;
 
 		    case FCS:
-		    	// MASTER:
-		    	if(myID==MBUS_FrameBuffer->TXID[0]){
-		    		HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->ACK, sizeof(MBUS_FrameBuffer->ACK));
-		    	}
 		    	// SLAVE:
-		    	else{
-		    		if(MBUS_FrameBuffer->FCS[0]==FCS_calc_buffer[0] && MBUS_FrameBuffer->FCS[1]==FCS_calc_buffer[1]){	//srovnej checksum
-		    			if(MBUS_FrameBuffer->RXID[0]==broadcastID){	// na broadcast nedavam ACK
-		    				MBUS_FillReceivedBuffer();
-		    				MBUS_Reset();
-		    	        	break;
-		    			}
-		    			else{HAL_UART_Transmit_IT(huart, &ACKbyte, sizeof(ACKbyte));}	// ACk na prijate zpravy
+		    	if(MBUS_FrameBuffer->FCS[0]==tmpFCSbuffer[0] && MBUS_FrameBuffer->FCS[1]==tmpFCSbuffer[1]){	// compare FCS
+		    		if(MBUS_FrameBuffer->RXID[0]==RXIDbroadcast){	// if RXID is BROADCAST -> do not ACK
+		    			MBUS_UpdateProcessedBuffer(RX_OK);
+		    			MBUS_Reset();
+		    	        break;
 		    		}
+		    		else{
+		    			HAL_UART_Transmit_IT(huart, &ACKbyte, sizeof(ACKbyte));	// transmit ACK
+		    		}
+		    	}
+		    	else{	// invalid FCS
+	    			MBUS_UpdateProcessedBuffer(RX_ERROR);
+		    		MBUS_Reset();
+		    		break;
 		    	}
 	        	MBUS_FrameStatus=ACK;
 		        break;
@@ -328,10 +318,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		    	// MASTER:
 		    	if(myID==MBUS_FrameBuffer->TXID[0]){
 		    		if(MBUS_FrameBuffer->ACK[0]==ACKbyte){
-		    			MBUS_FillReceivedBuffer();	//CORRECT FRAME
+		    			MBUS_UpdateProcessedBuffer(TX_OK);
 		    		}
 		    		else{
-		    			//COM_ERR - nedostal jsem ACK na moje vysilani -> budu muset opakovat (pokud me vyzve arbitr)
+		    			MBUS_UpdateProcessedBuffer(TX_NO_ACK);	// communication error: no ACK
 		    		}
 		    	}
 		    	MBUS_Reset();
@@ -341,16 +331,31 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		    	MBUS_Reset();
 		    	break;
 		    }
+		MBUS_StartTimeoutTimer();
+    	__enable_irq();
 	}
 }
 
-/*
-// INTERNAL: TIMEOUT IN COMMUNICATION
+// INTERNAL: BREAK EVENT
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+	if (HAL_UART_ERROR_FE) {
+    	__disable_irq();
+    	HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->TXID, sizeof(MBUS_FrameBuffer->TXID));
+    	MBUS_FrameStatus=TXID;
+    	__enable_irq();
+    }
+}
+
+// TIMER TIMEOUT
 void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	if(htim->Instance == TIM3){
-		__NOP();
+    	__disable_irq();
+		__HAL_TIM_CLEAR_FLAG(htim, TIM_FLAG_UPDATE);
+		if(MBUS_FrameStatus==ACK){MBUS_UpdateProcessedBuffer(TX_NO_ACK);}
+		else{MBUS_UpdateProcessedBuffer(ERROR_TIMEOUT);}
 		MBUS_Reset();
+    	__enable_irq();
 	}
 }
-*/
+

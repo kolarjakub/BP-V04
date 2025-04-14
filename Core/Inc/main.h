@@ -32,6 +32,7 @@ extern "C" {
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "mbus.h"
+#include "rpm.h"
 #include <string.h>  // pro memset
 #include <stdbool.h>
 /* USER CODE END Includes */
