@@ -13,12 +13,22 @@
 
 #define myID 0x0C
 #define RXIDbroadcast 0x0F
-#define SYNCbyte 0x55
+#define SYNCbyte 0x05
 #define CHIDdebug 0x07
 #define CHIDmonitor 0x06
 #define IDLEframe 0xA5
 #define CHIDrpm 0xBB
 #define MBUSBridgeID 0x03
+
+#define SYNCbyteDefaultPeriod 1667		// 34.722 us -> 1666.656
+#define SYNCFrequencyRatioMin 99
+#define SYNCFrequencyRatioMax 101
+
+#define UARTtiming_Pin GPIO_PIN_12
+#define UARTtiming_GPIO_Port GPIOA
+#define UARTtiming_EXTI_IRQn EXTI4_15_IRQn
+
+#define MBUS_MAX_FRAME_TIME 15000
 
 extern TIM_HandleTypeDef htim3;
 extern UART_HandleTypeDef huart;
@@ -98,5 +108,6 @@ static const uint16_t HALCPU_CRC_CRC16CCITT_LUT8B_au16[256] = {
 unsigned MBUS_Init(void);
 unsigned MBUS_SetTransmittedData(const uint8_t aRXID,const uint8_t aCHID,const uint8_t aPayloadSize,const uint8_t aPayload[PAYLOAD_MAX_SIZE],const bool aAlowOverwrite);
 enum ProcessedFrameStatus MBUS_GetProcessedFrame(struct FrameBuffer *aFrameBuffer);
+float MBUS_GetFrequencySYNCRatio(void);
 
 #endif /* __MBUS_H */

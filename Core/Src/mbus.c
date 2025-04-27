@@ -14,19 +14,16 @@ const uint8_t ACKbyte=0xA5;
 uint8_t tmpFCSbuffer[2];
 volatile static bool bNewDataToTransmit=false;
 volatile static bool bNewProcessedData=false;
+volatile static uint8_t Payload_UARTCount=0;
+volatile static uint8_t FCS_UARTCount=0;
 
-uint16_t timerTop=320;
-uint16_t timerFrameDuration=10;
+static uint16_t SYNCbytePeriod = 0;
+static float SYNCFrequencyRatio=0;
 
+volatile static uint16_t UART_EdgeTime,UART_EdgePeriodStartTime,UART_EdgePeriodStopTime;
+volatile static uint8_t UART_EdgeCounter=0;
+volatile static uint32_t UART_Error;
 
-// INTERNAL: FRAME CHECKSUM SUBFUNCTION
-void static HALCPU_CRC_CRC16CCITT(const uint8_t aData[], const uint16_t aSize, uint8_t aCRCresult[2],uint16_t aCRCinput) {
-    for (uint16_t i = 0; i < aSize; i++) {
-    	aCRCinput = HALCPU_CRC_CRC16CCITT_LUT8B_au16[(uint8_t)(aData[i] ^ (aCRCinput >> 8))] ^ (aCRCinput << 8);
-    }
-    aCRCresult[0] = (uint8_t)(aCRCinput & 0xFF);
-    aCRCresult[1] = (uint8_t)((aCRCinput >> 8) & 0xFF);
-}
 
 // INTERNAL: FRAME CHECKSUM CALCULATION
 void static CalculateFCS(uint8_t aFCS[2],struct FrameBuffer *aFrameBuffer){
@@ -41,7 +38,15 @@ void static CalculateFCS(uint8_t aFCS[2],struct FrameBuffer *aFrameBuffer){
 		tmpFrameBuffer[4+i]=aFrameBuffer->Payload[i];	// copy data from Payload to tmpFrameBuffer
 	}
 
-	HALCPU_CRC_CRC16CCITT(tmpFrameBuffer,CurrentFrameSize,aFCS,0xFFFF);
+	//HALCPU_CRC_CRC16CCITT(tmpFrameBuffer,CurrentFrameSize,aFCS,0xFFFF);
+
+	uint16_t tmpCRC=0xFFFF;
+    for (uint16_t i = 0; i < CurrentFrameSize; i++) {
+    	tmpCRC = HALCPU_CRC_CRC16CCITT_LUT8B_au16[(uint8_t)(tmpFrameBuffer[i] ^ (tmpCRC >> 8))] ^ (tmpCRC << 8);
+    }
+    aFCS[0] = (uint8_t)(tmpCRC & 0xFF);
+    aFCS[1] = (uint8_t)((tmpCRC >> 8) & 0xFF);
+
 	free(tmpFrameBuffer);
 }
 
@@ -78,6 +83,15 @@ enum ProcessedFrameStatus MBUS_GetProcessedFrame(struct FrameBuffer *aFrameBuffe
 	else{return NO_NEW_DATA;}
 }
 
+// API: RETURNS FREQUENCY CALIBRATION RATIO *100
+float MBUS_GetFrequencySYNCRatio(void)
+{
+	//SYNCFrequencyRatio=(100.0f*SYNCbyteDefaultPeriod)/SYNCbytePeriod;//(float)
+	SYNCFrequencyRatio=(100.0f*SYNCbytePeriod)/SYNCbyteDefaultPeriod;//(float)
+	if(SYNCFrequencyRatio<=SYNCFrequencyRatioMax && SYNCFrequencyRatio>=SYNCFrequencyRatioMin){return SYNCFrequencyRatio;}
+	else{return 0.00;}
+}
+
 // INTERNAL: INPUT DATA TO TRANSMIT
 void static MBUS_UpdateTransmittedBuffer(void){
 	if(bNewDataToTransmit){	// no new data -> transmit IDLE frame
@@ -94,10 +108,45 @@ void static MBUS_UpdateProcessedBuffer(enum ProcessedFrameStatus aProcessedFrame
 	bNewProcessedData=true;
 }
 
+void MBUS_StartTimeoutTimer(void)
+{
+	__HAL_TIM_SET_COUNTER(&htim3,0);
+
+	//HAL_TIM_OC_Start_IT(&htim3, TIM_CHANNEL_1);		// START TIMEOUT TIMER
+	HAL_TIM_Base_Start(&htim3);
+
+	if(MBUS_FrameStatus==TXID)
+	{
+		HAL_NVIC_EnableIRQ(EXTI4_15_IRQn);
+		UART_EdgeCounter=0;
+	}
+}
+
+void MBUS_StopTimeoutTimer(void)
+{
+
+	//HAL_TIM_OC_Stop_IT(&htim3, TIM_CHANNEL_1);		// STOP TIMEOUT TIMER
+	HAL_TIM_Base_Stop(&htim3);
+	if(MBUS_FrameStatus==TXID && MBUS_FrameBuffer->TXID[0]==SYNCbyte)
+	{
+		HAL_NVIC_DisableIRQ(EXTI4_15_IRQn);
+		SYNCbytePeriod=UART_EdgePeriodStopTime-UART_EdgePeriodStartTime;
+	}
+}
+
+
 // INTERNAL: RESET COMMUNICATION
 void static MBUS_Reset(void){
-	HAL_TIM_OC_Stop_IT(&htim3, TIM_CHANNEL_1);
-    MBUS_FrameBuffer->TXID[0]=0xFF;
+	//HAL_TIM_OC_Stop_IT(&htim3, TIM_CHANNEL_1);
+	MBUS_StopTimeoutTimer();
+
+	HAL_UART_AbortTransmit_IT(&huart);	// not tested yet
+	HAL_UART_AbortReceive_IT(&huart);	// not tested yet
+
+	Payload_UARTCount=0;
+	FCS_UARTCount=0;
+
+	MBUS_FrameBuffer->TXID[0]=0xFF;
 	HAL_UART_Receive_IT(&huart,MBUS_FrameBuffer->BREAK, sizeof(MBUS_FrameBuffer->BREAK));
 	MBUS_FrameStatus=IDLE;
 }
@@ -119,7 +168,11 @@ unsigned MBUS_Init(void) {
 	if (HAL_UART_Init(&huart) != HAL_OK) {return 1;}
 	if (HAL_UARTEx_SetTxFifoThreshold(&huart, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK) {return 2;}
 	if (HAL_UARTEx_SetRxFifoThreshold(&huart, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK) {return 3;}
-	if (HAL_UARTEx_DisableFifoMode(&huart) != HAL_OK) {return 4;}
+	//if (HAL_UARTEx_DisableFifoMode(&huart) != HAL_OK) {return 4;}
+
+	if (HAL_LIN_Init(&huart,UART_LINBREAKDETECTLENGTH_11B)) {return 11;}	// BREAK DETECT LENGTH
+	//HAL_UART_ReceiverTimeout_Config(&huart,5);
+
 	MBUS_FrameBuffer=calloc(1,sizeof(struct FrameBuffer));
 	MBUS_FrameBuffer_ToTransmit=calloc(1,sizeof(struct FrameBuffer));
 	MBUS_FrameBuffer_Processed=calloc(1,sizeof(struct FrameBuffer));
@@ -130,7 +183,7 @@ unsigned MBUS_Init(void) {
 	TIM_ClockConfigTypeDef sClockSourceConfig = {0};
 	TIM_OC_InitTypeDef sConfigOC = {0};
 	htim3.Instance = TIM3;
-	htim3.Init.Prescaler = 2500;
+	htim3.Init.Prescaler = 0;	// 0 pro 48 MHz
 	htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
 	htim3.Init.Period = 65535;
 	//htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV4;
@@ -143,31 +196,32 @@ unsigned MBUS_Init(void) {
 	sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
 	if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK){return 9;}
 	sConfigOC.OCMode = TIM_OCMODE_TIMING;
-	sConfigOC.Pulse = timerTop;
+	sConfigOC.Pulse = MBUS_MAX_FRAME_TIME;
 	sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
 	sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
 	if (HAL_TIM_OC_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK){return 10;}
+	HAL_TIM_OC_Start_IT(&htim3, TIM_CHANNEL_1);		// INTERRUPT ON TIMER 3
+
+	// EXTERNAL INTERRUPT FOR FRAME TIMING
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+	GPIO_InitStruct.Pin = UARTtiming_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(UARTtiming_GPIO_Port, &GPIO_InitStruct);
+	HAL_NVIC_SetPriority(EXTI4_15_IRQn, 0, 0);
+	//HAL_NVIC_EnableIRQ(EXTI4_15_IRQn);
 
 	// START COMMUNICATION
 	MBUS_Reset();
 	return 0;
 }
 
-void MBUS_StartTimeoutTimer(void)
-{
-	HAL_TIM_OC_Stop_IT(&htim3, TIM_CHANNEL_1);		// STOP TIMEOUT TIMER
-	if(MBUS_FrameStatus==Payload){__HAL_TIM_SET_COUNTER(&htim3,timerTop-MBUS_FrameBuffer->PS[0]*timerFrameDuration);}
-	else if(MBUS_FrameStatus==FCS){__HAL_TIM_SET_COUNTER(&htim3,timerTop-2*timerFrameDuration);}
-	else{__HAL_TIM_SET_COUNTER(&htim3,timerTop-timerFrameDuration);}
-	HAL_TIM_OC_Start_IT(&htim3, TIM_CHANNEL_1);		// START TIMEOUT TIMER
-
-}
-
 // INTERNAL: INTERRUPT - UART FINISHED TRANSMITTING
  void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1){
-    	__disable_irq();
+    	//__disable_irq();
+    	MBUS_StopTimeoutTimer();
     	switch (MBUS_FrameStatus) {
     	    case IDLE:
     	    	break;
@@ -182,12 +236,13 @@ void MBUS_StartTimeoutTimer(void)
     	    	if(MBUS_FrameBuffer->RXID[0]==IDLEframe){
 	    			MBUS_UpdateProcessedBuffer(TX_IDLE_FRAME);
     	    		MBUS_Reset();	// transmitted IDLE frame -> wait for new communication
+    	    		break;
     	    	}
     	    	else{
     	    		HAL_UART_Transmit_IT(huart,MBUS_FrameBuffer->CHID, sizeof(MBUS_FrameBuffer->CHID));
     	    		MBUS_FrameStatus=CHID;
+    	    		break;
     	    	}
-        		break;
 
     	    case CHID:
     	        // MASTER:
@@ -197,15 +252,25 @@ void MBUS_StartTimeoutTimer(void)
 
     	    case PS:
     	    	// MASTER:
-    	    	HAL_UART_Transmit_IT(huart,MBUS_FrameBuffer->Payload,MBUS_FrameBuffer->PS[0]);
-	        	MBUS_FrameStatus=Payload;
+    	    	HAL_UART_Transmit_IT(huart,MBUS_FrameBuffer->Payload+Payload_UARTCount,sizeof(uint8_t));
+	    		Payload_UARTCount++;
+    	    	if(Payload_UARTCount>=MBUS_FrameBuffer->PS[0])
+    	    	{
+        	    	Payload_UARTCount=0;
+        	    	MBUS_FrameStatus=Payload;
+    	    	}
     	        break;
 
     	    case Payload:
     	    	// MASTER:
-    	    	HAL_UART_Transmit_IT(huart,MBUS_FrameBuffer->FCS, sizeof(MBUS_FrameBuffer->FCS));
-	        	MBUS_FrameStatus=FCS;
-        		break;
+    	    	HAL_UART_Transmit_IT(huart,MBUS_FrameBuffer->FCS+FCS_UARTCount, sizeof(uint8_t));
+	    		FCS_UARTCount++;
+    	    	if(FCS_UARTCount>=2)
+    	    	{
+        	    	FCS_UARTCount=0;
+        	    	MBUS_FrameStatus=FCS;
+    	    	}
+    	    	break;
 
     	    case FCS:
     	    	// MASTER:
@@ -230,15 +295,19 @@ void MBUS_StartTimeoutTimer(void)
     	    	break;
     	}
     	MBUS_StartTimeoutTimer();
-    	__enable_irq();
+    	//__enable_irq();
     }
 }
+
+
+
 
 // INTERNAL: INTERRUPT - UART FINISHED RECEIVING
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if (huart->Instance == USART1){
-    	__disable_irq();
+    	//__disable_irq();
+    	MBUS_StopTimeoutTimer();
 		switch (MBUS_FrameStatus) {
 		    case IDLE:
 				break;
@@ -251,14 +320,16 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		        	MBUS_FrameStatus=RXID;
 		        }
 		        // SLAVE:
+	        	else if(MBUS_FrameBuffer->TXID[0]==SYNCbyte){	// SYNC Byte
+		        		MBUS_UpdateProcessedBuffer(SYNC_BYTE);
+			        	MBUS_Reset();
+	        	}
 		        else if (MBUS_FrameBuffer->TXID[0]>=0x00 && MBUS_FrameBuffer->TXID[0]<=0x0E){	// check validity of TXID
 		        	HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->RXID, sizeof(MBUS_FrameBuffer->RXID));
-			        MBUS_FrameStatus=RXID;
+		        	MBUS_FrameStatus=RXID;
 		        }
-		        // RESET
-		        else{	// invalid TXID or SYNC byte
-		        	if(MBUS_FrameBuffer->TXID[0]>=SYNCbyte){MBUS_UpdateProcessedBuffer(SYNC_BYTE);}
-		        	else{MBUS_UpdateProcessedBuffer(RX_ERROR);}
+		        else{	// invalid TXID
+		        	MBUS_UpdateProcessedBuffer(RX_ERROR);
 		        	MBUS_Reset();
 		        }
 		        break;
@@ -283,19 +354,29 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 		    case PS:
 		    	// SLAVE:
-	        	HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->Payload,MBUS_FrameBuffer->PS[0]);
-	        	MBUS_FrameStatus=Payload;
+	        	HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->Payload+Payload_UARTCount,sizeof(uint8_t));
+	    		Payload_UARTCount++;
+    	    	if(Payload_UARTCount>=MBUS_FrameBuffer->PS[0])
+    	    	{
+        	    	Payload_UARTCount=0;
+    	    		MBUS_FrameStatus=Payload;
+    	    	}
 		        break;
 
 		    case Payload:
 		    	// SLAVE:
-	        	HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->FCS,sizeof(MBUS_FrameBuffer->FCS));
-	    		CalculateFCS(tmpFCSbuffer,MBUS_FrameBuffer);
-	        	MBUS_FrameStatus=FCS;
+    	    	HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->FCS+FCS_UARTCount, sizeof(uint8_t));
+	    		FCS_UARTCount++;
+    	    	if(FCS_UARTCount>=2)
+    	    	{
+        	    	FCS_UARTCount=0;
+        	    	MBUS_FrameStatus=FCS;
+    	    	}
 	    		break;
 
 		    case FCS:
 		    	// SLAVE:
+	        	CalculateFCS(tmpFCSbuffer,MBUS_FrameBuffer);
 		    	if(MBUS_FrameBuffer->FCS[0]==tmpFCSbuffer[0] && MBUS_FrameBuffer->FCS[1]==tmpFCSbuffer[1]){	// compare FCS
 		    		if(MBUS_FrameBuffer->RXID[0]==RXIDbroadcast){	// if RXID is BROADCAST -> do not ACK
 		    			MBUS_UpdateProcessedBuffer(RX_OK);
@@ -331,31 +412,70 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		    	MBUS_Reset();
 		    	break;
 		    }
-		MBUS_StartTimeoutTimer();
-    	__enable_irq();
+    	MBUS_StartTimeoutTimer();
+    	//__enable_irq();
 	}
 }
 
+
 // INTERNAL: BREAK EVENT
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
-	if (HAL_UART_ERROR_FE) {
-    	__disable_irq();
+	UART_Error = HAL_UART_GetError(huart);
+
+	if (UART_Error==HAL_UART_ERROR_FE)
+	{
+    	//__disable_irq();
     	HAL_UART_Receive_IT(huart,MBUS_FrameBuffer->TXID, sizeof(MBUS_FrameBuffer->TXID));
     	MBUS_FrameStatus=TXID;
+		MBUS_StartTimeoutTimer();
+    	//__enable_irq();
+
+	}
+	/*
+	else if(UART_Error==HAL_UART_ERROR_RTO)
+	{
+    	__disable_irq();
+		if(MBUS_FrameStatus==ACK){
+			MBUS_UpdateProcessedBuffer(TX_NO_ACK);
+		}
+		else{MBUS_UpdateProcessedBuffer(ERROR_TIMEOUT);}
+		MBUS_Reset();
     	__enable_irq();
-    }
+	}*/
+	else
+	{
+		MBUS_Reset();
+	}
 }
+
 
 // TIMER TIMEOUT
 void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	if(htim->Instance == TIM3){
-    	__disable_irq();
 		__HAL_TIM_CLEAR_FLAG(htim, TIM_FLAG_UPDATE);
-		if(MBUS_FrameStatus==ACK){MBUS_UpdateProcessedBuffer(TX_NO_ACK);}
+		if(MBUS_FrameStatus==ACK){
+			MBUS_UpdateProcessedBuffer(TX_NO_ACK);
+		}
 		else{MBUS_UpdateProcessedBuffer(ERROR_TIMEOUT);}
 		MBUS_Reset();
-    	__enable_irq();
 	}
 }
+
+// UART TIMING
+void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
+{
+	UART_EdgeTime=__HAL_TIM_GET_COUNTER(&htim3);
+
+	if(UART_EdgeCounter==1){
+		UART_EdgePeriodStartTime=UART_EdgeTime;
+	}
+	else if(UART_EdgeCounter==2){	// 1 perioda signalu
+		UART_EdgePeriodStopTime=UART_EdgeTime;
+	}
+
+	UART_EdgeCounter++;
+}
+
+
 

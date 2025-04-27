@@ -4,13 +4,13 @@ TIM_HandleTypeDef htim1;
 static volatile bool bNewRPM = false;
 static volatile bool bMaxMeasureTimeExceeded = false;
 
+static uint32_t CLK_default;
 static uint32_t CLK;
 volatile static uint8_t RPM_ID = 0;
 static uint16_t OVFlimit;
-volatile static uint16_t captureValue = 0,previousCaptureValue = 0;
+volatile static uint16_t captureValue = 0,previousCaptureValue = 0, measureTime=0;
 volatile static uint32_t ticks=0;
 volatile static float RPM=0;
-volatile static uint16_t measureTime=0;
 volatile static uint8_t minMeasureTime,maxMeasureTime;
 volatile static uint32_t OVFcounter=0;
 static volatile uint8_t measureCounter=0;
@@ -43,8 +43,9 @@ unsigned RPM_Init(void){
   HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_4);
   HAL_TIM_Base_Start_IT(&htim1);
 
-  CLK=HAL_RCC_GetPCLK1Freq();
-  OVFlimit=(CLK*60)/(RPM_THRESHHOLD*65536*RPM_PULSES);
+  CLK_default=HAL_RCC_GetPCLK1Freq();
+  CLK=CLK_default;
+  OVFlimit=(CLK*60)/(RPM_THRESHOLD*65536*RPM_PULSES);
   minMeasureTime=((uint32_t)((float)(OVFlimit/3)*65536))/(CLK/1000);
   maxMeasureTime=((uint32_t)(float)OVFlimit*65536)/(CLK/1000);
   return 0;
@@ -65,6 +66,17 @@ unsigned RPM_GetData(uint8_t aRPMMessage[5])
 	RPMtoRPMMessage(aRPMMessage,&RPM,&measureTime,RPM_ID);
 	RPM_ID++;
 	bNewRPM=false;
+	return 0;
+}
+
+unsigned RPM_UpdateFrequencyRatio(float aSYNCFrequencyRatio)
+{
+	if(!aSYNCFrequencyRatio){return 1;}
+	CLK = (float)CLK_default * (aSYNCFrequencyRatio / 100.0f);
+	OVFlimit=(CLK*60)/(RPM_THRESHOLD*65536*RPM_PULSES);
+	minMeasureTime=((uint32_t)((float)(OVFlimit/3)*65536))/(CLK/1000);
+	maxMeasureTime=((uint32_t)(float)OVFlimit*65536)/(CLK/1000);
+
 	return 0;
 }
 
@@ -97,7 +109,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM1 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_4) //
     {
-		__disable_irq();
+		//__disable_irq();
 		captureValue = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_4);
 		if(OVFcounter>0){ticks=65536*OVFcounter + captureValue - previousCaptureValue;}
 		else{ticks=captureValue - previousCaptureValue;}
@@ -117,7 +129,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 			}
 			RPM_ResetMeasurement();
 		}
-		__enable_irq();
+		//__enable_irq();
     }
 }
 
@@ -125,20 +137,20 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	if(htim->Instance == TIM1){
-		__disable_irq();
+		//__disable_irq();
 		if (__HAL_TIM_GET_IT_SOURCE(htim, TIM_IT_UPDATE))
 		{
 			if(OVFcounter>=OVFlimit)
 			{
-				measureTime=maxMeasureTime;
 				captureValue = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_4);
+				measureTime=maxMeasureTime;
 				RPM=0;	// value below threshold
 				RPM_ResetMeasurement();
 				bMaxMeasureTimeExceeded=true;
 			}
 			else{OVFcounter++;}
 		}
-		__enable_irq();
+		//__enable_irq();
 	}
 }
 

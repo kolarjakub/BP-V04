@@ -22,13 +22,6 @@
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 
-unsigned counterTX_NO_ACK=0;
-unsigned counterTX_IDLE_FRAME=0;
-unsigned counterELSE=0;
-
-uint32_t last_time=0;
-uint32_t elapsed=0;
-
 int main(void)
 {
   HAL_Init();
@@ -44,30 +37,25 @@ int main(void)
   uint8_t *RPMMessage=calloc(RPM_MESSAGE_SIZE,sizeof(uint8_t));
   if(RPMMessage==NULL){Error_Handler();}
 
-  last_time=HAL_GetTick();
   while (1)
   {
 	  if(!RPM_GetData(RPMMessage))
 	  {
-		  elapsed=HAL_GetTick()-last_time;
-		  last_time=HAL_GetTick();
 		  if(!MBUS_SetTransmittedData(MBUSBridgeID,CHIDrpm,RPM_MESSAGE_SIZE,RPMMessage,true))
 		  {
 			  __NOP();
 		  }
 	  }
 
-
-	  if(MBUS_GetProcessedFrame(ReceivedFrameBuffer)==TX_NO_ACK){counterTX_NO_ACK++;}
-	  else if(MBUS_GetProcessedFrame(ReceivedFrameBuffer)==TX_IDLE_FRAME){counterTX_IDLE_FRAME++;}
-	  else(counterELSE++);
-
-	  // HAL_Delay(1000);
-
+	  if(MBUS_GetProcessedFrame(ReceivedFrameBuffer)==SYNC_BYTE){
+		  RPM_UpdateFrequencyRatio(MBUS_GetFrequencySYNCRatio());
+	  }
   }
 }
 
 
+// RC oscilator HSI48
+// – Internal 48 MHz RC oscillator (±1 %)
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};

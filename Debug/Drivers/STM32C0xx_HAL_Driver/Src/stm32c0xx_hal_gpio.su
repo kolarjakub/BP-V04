@@ -6,5 +6,5 @@
 ../Drivers/STM32C0xx_HAL_Driver/Src/stm32c0xx_hal_gpio.c:462:6:HAL_GPIO_TogglePin	24	static
 ../Drivers/STM32C0xx_HAL_Driver/Src/stm32c0xx_hal_gpio.c:487:19:HAL_GPIO_LockPin	24	static
 ../Drivers/STM32C0xx_HAL_Driver/Src/stm32c0xx_hal_gpio.c:519:6:HAL_GPIO_EXTI_IRQHandler	16	static
-../Drivers/STM32C0xx_HAL_Driver/Src/stm32c0xx_hal_gpio.c:540:13:HAL_GPIO_EXTI_Rising_Callback	16	static
-../Drivers/STM32C0xx_HAL_Driver/Src/stm32c0xx_hal_gpio.c:555:13:HAL_GPIO_EXTI_Falling_Callback	16	static
+../Drivers/STM32C0xx_HAL_Driver/Src/stm32c0xx_hal_gpio.c:541:13:HAL_GPIO_EXTI_Rising_Callback	16	static
+../Drivers/STM32C0xx_HAL_Driver/Src/stm32c0xx_hal_gpio.c:556:13:HAL_GPIO_EXTI_Falling_Callback	16	static
